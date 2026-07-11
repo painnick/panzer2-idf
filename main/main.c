@@ -153,6 +153,9 @@ static int64_t g_l1_last_change = 0;
 static int64_t g_r1_last_change = 0;
 static bool g_volume_changed = false;
 
+// Start 버튼 (터렛 중앙) 엣지 감지
+static bool g_start_pressed = false;
+
 // 현재 시간 (us)
 static inline int64_t now_us(void) {
     return esp_timer_get_time();
@@ -460,6 +463,17 @@ static void process_gamepad(int32_t axis_y, int32_t axis_ry,
                 }
             }
         }
+    }
+
+    // Start: 터렛 서보 중앙(90°)
+    if (misc_buttons & MISC_BUTTON_START) {
+        if (!g_start_pressed) {
+            g_start_pressed = true;
+            g_turret_last_input_ms = now_ms();
+            set_turret_angle(90);
+        }
+    } else {
+        g_start_pressed = false;
     }
 
     // B 버튼: LED·효과음 먼저, 반동은 RECOIL_DELAY_MS 후 process_recoil()
