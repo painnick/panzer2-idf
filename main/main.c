@@ -71,8 +71,11 @@ static const char* TAG = "RC_TANK";
 #define CANNON_LED_DURATION     200
 #define MACHINE_GUN_DURATION    500   // panzer4 MG_FIRE_MS
 #define MG_LED_BLINK_MS         75    // panzer4 게틀링 LED 깜빡임 주기
-#define RECOIL_BACK_DURATION    100
-#define RECOIL_SETTLE_DURATION  80
+#define RECOIL_DELAY_MS         350   // LED·효과음 후 반동 시작 지연 (ms)
+#define RECOIL_BACK_DURATION    40    // 포 발사 시 후진 시간 (ms)
+#define RECOIL_SETTLE_DURATION  40    // 후진 후 정지 안정화 (ms)
+// 스틱 전진 = axis_y 음수 → 후진 반동은 양수 속도
+#define RECOIL_BACK_SPEED       400
 
 // ============================================================================
 // 모터 설정
@@ -106,7 +109,8 @@ static int g_turret_angle = 90;
 static bool g_cannon_firing = false;
 static int64_t g_cannon_start_time = 0;
 
-// 리코일
+// 리코일 (pending: LED/효과음 대기 → active: 후진/안정화)
+static bool g_recoil_pending = false;
 static bool g_recoil_active = false;
 static int64_t g_recoil_start_time = 0;
 
@@ -297,24 +301,16 @@ static void process_gamepad(int32_t axis_y, int32_t axis_ry,
         set_turret_angle(g_turret_angle);
     }
 
-    // B 버튼: 포신 발사
-    if ((buttons & BUTTON_B) && !g_cannon_firing && !g_machinegun_firing && !g_recoil_active) {
+    // B 버튼: LED·효과음 먼저, 반동은 RECOIL_DELAY_MS 후 process_recoil()
+    if ((buttons & BUTTON_B) && !g_cannon_firing && !g_machinegun_firing
+            && !g_recoil_pending && !g_recoil_active) {
         g_cannon_firing = true;
         g_cannon_start_time = now_ms();
-
         gpio_set_level(PIN_CANNON_LED, 1);
-        // 리코일 시작
-        g_recoil_active = true;
-        g_recoil_start_time = now_ms();
-        set_motor_speed(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, -400);
-        set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, -400);
-
-        vTaskDelay(pdMS_TO_TICKS(100));
-        gpio_set_level(PIN_CANNON_LED, 0);
-        set_motor_speed(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, 0);
-        set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, 0);
-
         dfplayer_play(DFPLAYER_TRACK_CANNON);
+
+        g_recoil_pending = true;
+        g_recoil_start_time = now_ms();
     }
 
     // A 버튼: 기관총(게틀링) 발사 — LED 깜빡임 + 효과음
@@ -409,12 +405,27 @@ static void process_machinegun_firing(void) {
 }
 
 static void process_recoil(void) {
+    int64_t now = now_ms();
+
+    // LED·효과음 재생 후 반동 시작
+    if (g_recoil_pending) {
+        if (now - g_recoil_start_time < RECOIL_DELAY_MS) {
+            return;
+        }
+        g_recoil_pending = false;
+        g_recoil_active = true;
+        g_recoil_start_time = now;
+        set_motor_speed(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, RECOIL_BACK_SPEED);
+        set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, RECOIL_BACK_SPEED);
+        return;
+    }
+
     if (!g_recoil_active) return;
-    int64_t elapsed = now_ms() - g_recoil_start_time;
+    int64_t elapsed = now - g_recoil_start_time;
 
     if (elapsed < RECOIL_BACK_DURATION) {
-        set_motor_speed(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, -400);
-        set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, -400);
+        set_motor_speed(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, RECOIL_BACK_SPEED);
+        set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, RECOIL_BACK_SPEED);
         return;
     }
     if (elapsed < RECOIL_BACK_DURATION + RECOIL_SETTLE_DURATION) {
