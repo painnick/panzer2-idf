@@ -71,6 +71,8 @@ static const char* TAG = "RC_TANK";
 #define CANNON_LED_DURATION     200
 #define MACHINE_GUN_DURATION    500   // panzer4 MG_FIRE_MS
 #define MG_LED_BLINK_MS         75    // panzer4 게틀링 LED 깜빡임 주기
+#define TURRET_STEP_INTERVAL_MS 120   // 터렛 1° 이동 간격 (ms) — 아주 느리게
+#define TURRET_IDLE_DISCONNECT_MS 3000 // 터렛 무입력 시 서보 연결 해제 (ms)
 #define RECOIL_DELAY_MS         350   // LED·효과음 후 반동 시작 지연 (ms)
 #define RECOIL_BACK_DURATION    40    // 포 발사 시 후진 시간 (ms)
 #define RECOIL_SETTLE_DURATION  40    // 후진 후 정지 안정화 (ms)
@@ -104,6 +106,9 @@ static int g_temp_volume = 20;
 
 // 터렛 서보
 static int g_turret_angle = 90;
+static int64_t g_turret_last_step_ms = 0;
+static int64_t g_turret_last_input_ms = 0;
+static bool g_turret_attached = false;
 
 // 포신 발사
 static bool g_cannon_firing = false;
@@ -205,7 +210,7 @@ static void init_ledc(void) {
         ledc_channel_config(&ch);
     }
 
-    // 서보 타이머: 50Hz, 14-bit
+    // 서보 타이머: 50Hz, 14-bit (채널은 입력 시 attach)
     ledc_timer_config_t servo_timer = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
         .duty_resolution = LEDC_SERVO_RES,
@@ -214,17 +219,6 @@ static void init_ledc(void) {
         .clk_cfg = LEDC_AUTO_CLK,
     };
     ledc_timer_config(&servo_timer);
-
-    // 서보 채널
-    ledc_channel_config_t servo_ch = {
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel = LEDC_CH_SERVO,
-        .timer_sel = LEDC_TIMER_SERVO,
-        .gpio_num = PIN_TURRET_SERVO,
-        .duty = 0,
-        .hpoint = 0,
-    };
-    ledc_channel_config(&servo_ch);
 }
 
 // ============================================================================
@@ -254,18 +248,61 @@ static void set_motor_speed(ledc_channel_t ch_in1, ledc_channel_t ch_in2, int sp
 }
 
 // ============================================================================
-// 서보 제어
+// 서보 제어 (무입력 시 연결 해제 → 버즈/전류 감소)
 // ============================================================================
-static void set_turret_angle(int angle) {
+static void turret_apply_pwm(int angle) {
     if (angle < 0) angle = 0;
     if (angle > 180) angle = 180;
-    g_turret_angle = angle;
-
     // 0.5ms(0도) ~ 2.5ms(180도) in 14-bit (0~16383) at 50Hz(20ms)
     // 0.5ms = 409, 2.5ms = 2048
     uint32_t duty = 409 + (uint32_t)((int32_t)angle * (2048 - 409) / 180);
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CH_SERVO, duty);
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CH_SERVO);
+}
+
+static void turret_attach(void) {
+    if (g_turret_attached) return;
+
+    ledc_channel_config_t servo_ch = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = LEDC_CH_SERVO,
+        .timer_sel = LEDC_TIMER_SERVO,
+        .gpio_num = PIN_TURRET_SERVO,
+        .duty = 0,
+        .hpoint = 0,
+    };
+    ledc_channel_config(&servo_ch);
+    g_turret_attached = true;
+    turret_apply_pwm(g_turret_angle);
+    ESP_LOGD(TAG, "터렛 서보 연결");
+}
+
+static void turret_detach(void) {
+    if (!g_turret_attached) return;
+
+    ledc_stop(LEDC_LOW_SPEED_MODE, LEDC_CH_SERVO, 0);
+    gpio_reset_pin(PIN_TURRET_SERVO);
+    g_turret_attached = false;
+    ESP_LOGD(TAG, "터렛 서보 연결 해제");
+}
+
+static void set_turret_angle(int angle) {
+    if (angle < 0) angle = 0;
+    if (angle > 180) angle = 180;
+    g_turret_angle = angle;
+
+    if (!g_turret_attached) {
+        turret_attach();
+    } else {
+        turret_apply_pwm(g_turret_angle);
+    }
+}
+
+static void process_turret_idle(void) {
+    if (!g_turret_attached) return;
+    if (now_ms() - g_turret_last_input_ms >= TURRET_IDLE_DISCONNECT_MS) {
+        turret_detach();
+    }
 }
 
 // ============================================================================
@@ -290,15 +327,25 @@ static void process_gamepad(int32_t axis_y, int32_t axis_ry,
         set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, right_speed);
     }
 
-    // D-PAD 좌우: 터렛 회전
-    if (dpad & DPAD_LEFT) {
-        g_turret_angle -= 1;
-        if (g_turret_angle < 0) g_turret_angle = 0;
-        set_turret_angle(g_turret_angle);
-    } else if (dpad & DPAD_RIGHT) {
-        g_turret_angle += 1;
-        if (g_turret_angle > 180) g_turret_angle = 180;
-        set_turret_angle(g_turret_angle);
+    // D-PAD 좌우: 터렛 회전 (입력 시 재연결, TURRET_STEP_INTERVAL_MS마다 1°)
+    if ((dpad & DPAD_LEFT) || (dpad & DPAD_RIGHT)) {
+        int64_t now = now_ms();
+        g_turret_last_input_ms = now;
+        if (!g_turret_attached) {
+            turret_attach();
+        }
+        if (now - g_turret_last_step_ms >= TURRET_STEP_INTERVAL_MS) {
+            g_turret_last_step_ms = now;
+            if (dpad & DPAD_LEFT) {
+                if (g_turret_angle > 0) {
+                    set_turret_angle(g_turret_angle - 1);
+                }
+            } else {
+                if (g_turret_angle < 180) {
+                    set_turret_angle(g_turret_angle + 1);
+                }
+            }
+        }
     }
 
     // B 버튼: LED·효과음 먼저, 반동은 RECOIL_DELAY_MS 후 process_recoil()
@@ -495,6 +542,7 @@ static void control_task(void* arg) {
         process_cannon_firing();
         process_machinegun_firing();
         process_recoil();
+        process_turret_idle();
         process_idle_sound();
 
         vTaskDelay(pdMS_TO_TICKS(LOOP_INTERVAL_MS));
@@ -562,7 +610,8 @@ void app_main(void) {
     // LEDC 초기화
     init_ledc();
 
-    // 서보 초기 각도
+    // 서보 초기 각도 (이후 무입력 3초면 연결 해제)
+    g_turret_last_input_ms = now_ms();
     set_turret_angle(g_turret_angle);
 
     // DFPlayer 초기화 (실패해도 탱크/BT는 계속)
