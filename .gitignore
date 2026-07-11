@@ -1,0 +1,18 @@
+# ESP-IDF / CMake build outputs
+build/
+cmake-build-*/
+sdkconfig.old
+
+# IDE / editor
+.idea/
+.vscode/
+.mimocode/
+*.user
+*.suo
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
