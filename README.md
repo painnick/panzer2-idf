@@ -66,7 +66,7 @@ Arduino/PlatformIO 프로젝트 **M3Stuart_ESP32C3** 를 ESP-IDF v5.5.2 로 포�
 ### 포 발사 시퀀스 (B)
 
 1. 포신 LED ON + 포 효과음 재생
-2. `RECOIL_DELAY_MS`(기본 350ms) 대기
+2. `RECOIL_DELAY_MS`(기본 250ms) 대기
 3. 트랙 후진 리코일 (`RECOIL_BACK_DURATION` 40ms) → 정지 안정화 (`RECOIL_SETTLE_DURATION` 40ms)
 
 스틱 전진이 음수 축이므로 리코일 후진은 양수 모터 속도(`RECOIL_BACK_SPEED`)를 사용합니다. 리코일 중에는 스틱 모터 입력을 잠시 무시합니다.
