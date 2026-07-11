@@ -73,6 +73,7 @@ static const char* TAG = "RC_TANK";
 #define MG_LED_BLINK_MS         75    // panzer4 게틀링 LED 깜빡임 주기
 #define TURRET_STEP_INTERVAL_MS 120   // 터렛 1° 이동 간격 (ms) — 아주 느리게
 #define TURRET_IDLE_DISCONNECT_MS 3000 // 터렛 무입력 시 서보 연결 해제 (ms)
+#define GAMEPAD_CONNECT_GRACE_MS  500 // 연결 직후 입력 무시 (노이즈/잔여 D-Pad 방지)
 #define RECOIL_DELAY_MS         350   // LED·효과음 후 반동 시작 지연 (ms)
 #define RECOIL_BACK_DURATION    40    // 포 발사 시 후진 시간 (ms)
 #define RECOIL_SETTLE_DURATION  40    // 후진 후 정지 안정화 (ms)
@@ -123,6 +124,9 @@ static int g_turret_angle = 90;
 static int64_t g_turret_last_step_ms = 0;
 static int64_t g_turret_last_input_ms = 0;
 static bool g_turret_attached = false;
+
+// 게임패드 연결 직후 입력 무시 시각
+static int64_t g_input_ignore_until_ms = 0;
 
 // 포신 발사
 static bool g_cannon_firing = false;
@@ -416,6 +420,14 @@ static void process_turret_idle(void) {
 // ============================================================================
 static void process_gamepad(int32_t axis_y, int32_t axis_ry,
                             uint16_t buttons, uint8_t dpad, uint8_t misc_buttons) {
+    // 연결 직후 grace: 잔여 D-Pad/버튼으로 터렛·모터가 움직이지 않게
+    if (now_ms() < g_input_ignore_until_ms) {
+        if (!g_recoil_active) {
+            set_track_targets(0, 0);
+        }
+        return;
+    }
+
     // 데드존
     int left_y = (abs(axis_y) < 50) ? 0 : (int)axis_y;
     int right_y = (abs(axis_ry) < 50) ? 0 : (int)axis_ry;
@@ -425,21 +437,25 @@ static void process_gamepad(int32_t axis_y, int32_t axis_ry,
         set_track_targets(left_y, right_y);
     }
 
-    // D-PAD 좌우: 터렛 회전 (입력 시 재연결, TURRET_STEP_INTERVAL_MS마다 1°)
+    // D-PAD 좌우: 터렛 회전
+    // - 각도 변경 시에만 attach (연결 직후 PWM 재인가로 위치가 튀는 것 방지)
+    // - 이미 attach된 상태에서 홀드 중이면 idle 타이머만 갱신
     if ((dpad & DPAD_LEFT) || (dpad & DPAD_RIGHT)) {
         int64_t now = now_ms();
-        g_turret_last_input_ms = now;
-        if (!g_turret_attached) {
-            turret_attach();
+        if (g_turret_attached) {
+            g_turret_last_input_ms = now;
         }
         if (now - g_turret_last_step_ms >= TURRET_STEP_INTERVAL_MS) {
-            g_turret_last_step_ms = now;
             if (dpad & DPAD_LEFT) {
                 if (g_turret_angle > 0) {
+                    g_turret_last_step_ms = now;
+                    g_turret_last_input_ms = now;
                     set_turret_angle(g_turret_angle - 1);
                 }
-            } else {
+            } else if (dpad & DPAD_RIGHT) {
                 if (g_turret_angle < 180) {
+                    g_turret_last_step_ms = now;
+                    g_turret_last_input_ms = now;
                     set_turret_angle(g_turret_angle + 1);
                 }
             }
@@ -603,8 +619,13 @@ static void control_task(void* arg) {
     while (1) {
         bool cur_connected = gamepad_is_connected();
 
-        // 연결 직후: 게임패드 연결 효과음
+        // 연결 직후: 입력 유예 + 효과음 (터렛 각도는 건드리지 않음)
         if (gamepad_read_new_connection()) {
+            int64_t now = now_ms();
+            g_input_ignore_until_ms = now + GAMEPAD_CONNECT_GRACE_MS;
+            g_turret_last_step_ms = now; // 유예 직후 즉시 1° 스텝 방지
+            set_track_targets(0, 0);
+
             dfplayer_stop();
             vTaskDelay(pdMS_TO_TICKS(100));
             dfplayer_set_volume(g_current_volume);

@@ -104,6 +104,12 @@ static uni_error_t my_platform_on_device_ready(uni_hid_device_t* d) {
     ins->gamepad_seat = GAMEPAD_SEAT_A;
 
     if (xSemaphoreTake(g_gamepad.mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        // 연결 직후 잔여/노이즈 입력으로 터렛·모터가 움직이지 않도록 클리어
+        g_gamepad.axis_y = 0;
+        g_gamepad.axis_ry = 0;
+        g_gamepad.buttons = 0;
+        g_gamepad.dpad = 0;
+        g_gamepad.misc_buttons = 0;
         g_gamepad.connected = true;
         g_gamepad.new_connection = true;
         xSemaphoreGive(g_gamepad.mutex);
