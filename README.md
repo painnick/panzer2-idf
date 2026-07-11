@@ -10,7 +10,7 @@ Arduino/PlatformIO 프로젝트 **M3Stuart_ESP32C3** 를 ESP-IDF v5.5.2 로 포�
 | 기능 | 설명 |
 |------|------|
 | 트랙 구동 | DRV8833, 좌/우 스틱 Y축 — panzer4식 가속/감속 램프(~1초 최대) |
-| 터렛 | SG90 서보, D-Pad 좌우 — 느린 회전, 3초 무입력 시 서보 연결 해제 |
+| 터렛 | SG90 서보 — 패드 연결 시 attach, D-Pad 좌우 회전, 3초 무입력/해제 시 detach |
 | 포신 | B 버튼 — LED·효과음 후 트랙 후진 리코일 |
 | 게틀링(기관총) | A 버튼 — 게틀링 LED 깜빡임 + 효과음 |
 | 볼륨 | L1 / R1, NVS에 저장 |
@@ -80,9 +80,12 @@ Arduino/PlatformIO 프로젝트 **M3Stuart_ESP32C3** 를 ESP-IDF v5.5.2 로 포�
 
 ### 터렛 서보
 
+- **부팅**: 서보 미연결 (PWM 없음)
+- **게임패드 연결 시**: 서보 attach (마지막 각도)
+- **게임패드 해제 시**: 서보 detach
 - **회전 속도**: `TURRET_STEP_INTERVAL_MS`(기본 120ms)마다 1° — 전체 0°↔180°에 약 22초
-- **연결 해제**: D-Pad 터렛 입력이 `TURRET_IDLE_DISCONNECT_MS`(기본 **3초**) 없으면 PWM을 끊고 GPIO를 해제 (버즈·홀딩 전류 감소)
-- **재연결**: D-Pad 좌/우 입력이 다시 오면 서보를 attach한 뒤 마지막 각도부터 회전
+- **무입력 해제**: D-Pad 터렛 입력이 `TURRET_IDLE_DISCONNECT_MS`(기본 **3초**) 없으면 detach (버즈·홀딩 전류 감소)
+- **재연결**: D-Pad 좌/우로 각도를 바꿀 때 다시 attach
 
 ### 포 발사 시퀀스 (B)
 

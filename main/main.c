@@ -619,12 +619,14 @@ static void control_task(void* arg) {
     while (1) {
         bool cur_connected = gamepad_is_connected();
 
-        // 연결 직후: 입력 유예 + 효과음 (터렛 각도는 건드리지 않음)
+        // 연결 직후: 터렛 서보 연결 + 입력 유예 + 효과음
         if (gamepad_read_new_connection()) {
             int64_t now = now_ms();
             g_input_ignore_until_ms = now + GAMEPAD_CONNECT_GRACE_MS;
             g_turret_last_step_ms = now; // 유예 직후 즉시 1° 스텝 방지
+            g_turret_last_input_ms = now;
             set_track_targets(0, 0);
+            turret_attach(); // 패드 연결 전에는 서보 미연결
 
             dfplayer_stop();
             vTaskDelay(pdMS_TO_TICKS(100));
@@ -633,12 +635,13 @@ static void control_task(void* arg) {
             ESP_LOGI(TAG, "게임패드 연결됨");
         }
 
-        // 연결 해제 직후: 정리
+        // 연결 해제 직후: 정리 (서보 포함)
         if (prev_connected && !cur_connected) {
             dfplayer_set_volume(15); // initialVolume
             dfplayer_play_loop(DFPLAYER_TRACK_IDLE);
             g_last_idle_sound_time = now_ms();
             set_track_immediate(0, 0);
+            turret_detach();
             g_machinegun_firing = false;
             g_mg_led_on = false;
             gpio_set_level(PIN_MG_LED, 0);
@@ -706,6 +709,7 @@ void app_main(void) {
     gpio_reset_pin(PIN_RIGHT_IN2);
     gpio_reset_pin(PIN_CANNON_LED);
     gpio_reset_pin(PIN_MG_LED);
+    // 터렛 서보는 게임패드 연결 시 attach (부팅 시 PWM/출력 설정 안 함)
     gpio_reset_pin(PIN_TURRET_SERVO);
 
     gpio_set_direction(PIN_LEFT_IN1, GPIO_MODE_OUTPUT);
@@ -714,7 +718,6 @@ void app_main(void) {
     gpio_set_direction(PIN_RIGHT_IN2, GPIO_MODE_OUTPUT);
     gpio_set_direction(PIN_CANNON_LED, GPIO_MODE_OUTPUT);
     gpio_set_direction(PIN_MG_LED, GPIO_MODE_OUTPUT);
-    gpio_set_direction(PIN_TURRET_SERVO, GPIO_MODE_OUTPUT);
 
     gpio_set_level(PIN_LEFT_IN1, 0);
     gpio_set_level(PIN_LEFT_IN2, 0);
@@ -723,12 +726,8 @@ void app_main(void) {
     gpio_set_level(PIN_CANNON_LED, 0);
     gpio_set_level(PIN_MG_LED, 0);
 
-    // LEDC 초기화
+    // LEDC 초기화 (서보 채널은 패드 연결 시 turret_attach)
     init_ledc();
-
-    // 서보 초기 각도 (이후 무입력 3초면 연결 해제)
-    g_turret_last_input_ms = now_ms();
-    set_turret_angle(g_turret_angle);
 
     // DFPlayer 초기화 (실패해도 탱크/BT는 계속)
     if (dfplayer_init() != ESP_OK) {
