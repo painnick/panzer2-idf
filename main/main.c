@@ -33,8 +33,8 @@ static const char* TAG = "RC_TANK";
 #define PIN_LEFT_IN2        3   // DRV8833 좌측 트랙 IN2
 #define PIN_RIGHT_IN1       0   // DRV8833 우측 트랙 IN1
 #define PIN_RIGHT_IN2       5   // DRV8833 우측 트랙 IN2
-#define PIN_CANNON_LED      1   // 포신/기관총 LED
-#define PIN_HEADLIGHT       6   // 헤드라이트 LED
+#define PIN_CANNON_LED      1   // 포신 LED
+#define PIN_MG_LED          6   // 게틀링(기관총) LED
 #define PIN_TURRET_SERVO    7   // 터렛 SG90 서보
 
 // ============================================================================
@@ -66,11 +66,11 @@ static const char* TAG = "RC_TANK";
 #define LOOP_INTERVAL_MS        10
 #define IDLE_SOUND_INTERVAL_MS  13000
 #define VOLUME_CHANGE_INTERVAL  100
-#define HEADLIGHT_HOLD_MS       200
 #define BUTTON_SWAP_HOLD_MS     3000
 #define EEPROM_RESET_HOLD_MS    3000
 #define CANNON_LED_DURATION     200
-#define MACHINE_GUN_DURATION    500
+#define MACHINE_GUN_DURATION    500   // panzer4 MG_FIRE_MS
+#define MG_LED_BLINK_MS         75    // panzer4 게틀링 LED 깜빡임 주기
 #define RECOIL_BACK_DURATION    100
 #define RECOIL_SETTLE_DURATION  80
 
@@ -102,9 +102,6 @@ static int g_temp_volume = 20;
 // 터렛 서보
 static int g_turret_angle = 90;
 
-// 헤드라이트
-static bool g_headlight_on = false;
-
 // 포신 발사
 static bool g_cannon_firing = false;
 static int64_t g_cannon_start_time = 0;
@@ -113,9 +110,11 @@ static int64_t g_cannon_start_time = 0;
 static bool g_recoil_active = false;
 static int64_t g_recoil_start_time = 0;
 
-// 기관총
+// 기관총(게틀링)
 static bool g_machinegun_firing = false;
 static int64_t g_machinegun_start_time = 0;
+static bool g_mg_led_on = false;
+static int64_t g_mg_led_last_toggle = 0;
 
 // 효과음
 static int64_t g_last_idle_sound_time = 0;
@@ -126,10 +125,6 @@ static bool g_r1_pressed = false;
 static int64_t g_l1_last_change = 0;
 static int64_t g_r1_last_change = 0;
 static bool g_volume_changed = false;
-
-// 헤드라이트 Y 버튼
-static bool g_y_pressing = false;
-static int64_t g_y_press_start = 0;
 
 // 현재 시간 (us)
 static inline int64_t now_us(void) {
@@ -322,10 +317,13 @@ static void process_gamepad(int32_t axis_y, int32_t axis_ry,
         dfplayer_play(DFPLAYER_TRACK_CANNON);
     }
 
-    // A 버튼: 기관총 발사
+    // A 버튼: 기관총(게틀링) 발사 — LED 깜빡임 + 효과음
     if ((buttons & BUTTON_A) && !g_machinegun_firing && !g_cannon_firing) {
         g_machinegun_firing = true;
         g_machinegun_start_time = now_ms();
+        g_mg_led_on = true;
+        g_mg_led_last_toggle = now_ms();
+        gpio_set_level(PIN_MG_LED, 1);
         dfplayer_play(DFPLAYER_TRACK_MACHINEGUN);
     }
 
@@ -378,23 +376,6 @@ static void process_gamepad(int32_t axis_y, int32_t axis_ry,
         save_volume_to_nvs(g_current_volume);
         g_volume_changed = false;
     }
-
-    // Y 버튼: 헤드라이트 토글 (길게 누르기)
-    if (buttons & BUTTON_Y) {
-        if (!g_y_pressing) {
-            g_y_pressing = true;
-            g_y_press_start = now_ms();
-        }
-    } else {
-        if (g_y_pressing) {
-            g_y_pressing = false;
-            int64_t held = now_ms() - g_y_press_start;
-            if (held >= HEADLIGHT_HOLD_MS) {
-                g_headlight_on = !g_headlight_on;
-                gpio_set_level(PIN_HEADLIGHT, g_headlight_on ? 1 : 0);
-            }
-        }
-    }
 }
 
 // ============================================================================
@@ -404,19 +385,26 @@ static void process_cannon_firing(void) {
     if (!g_cannon_firing) return;
     if (now_ms() - g_cannon_start_time >= CANNON_LED_DURATION) {
         g_cannon_firing = false;
-        if (!g_machinegun_firing) {
-            gpio_set_level(PIN_CANNON_LED, 0);
-        }
+        gpio_set_level(PIN_CANNON_LED, 0);
     }
 }
 
+// panzer4: MG_LED_BLINK_MS 주기로 토글, MG_FIRE_MS 후 소등
 static void process_machinegun_firing(void) {
     if (!g_machinegun_firing) return;
-    if (now_ms() - g_machinegun_start_time >= MACHINE_GUN_DURATION) {
+
+    int64_t now = now_ms();
+    if (now - g_machinegun_start_time >= MACHINE_GUN_DURATION) {
         g_machinegun_firing = false;
-        if (!g_cannon_firing) {
-            gpio_set_level(PIN_CANNON_LED, 0);
-        }
+        g_mg_led_on = false;
+        gpio_set_level(PIN_MG_LED, 0);
+        return;
+    }
+
+    if (now - g_mg_led_last_toggle >= MG_LED_BLINK_MS) {
+        g_mg_led_last_toggle = now;
+        g_mg_led_on = !g_mg_led_on;
+        gpio_set_level(PIN_MG_LED, g_mg_led_on ? 1 : 0);
     }
 }
 
@@ -478,7 +466,10 @@ static void control_task(void* arg) {
             g_last_idle_sound_time = now_ms();
             set_motor_speed(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, 0);
             set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, 0);
-            gpio_set_level(PIN_HEADLIGHT, 0);
+            g_machinegun_firing = false;
+            g_mg_led_on = false;
+            gpio_set_level(PIN_MG_LED, 0);
+            gpio_set_level(PIN_CANNON_LED, 0);
             ESP_LOGI(TAG, "게임패드 연결 해제됨");
         }
         prev_connected = cur_connected;
@@ -539,7 +530,7 @@ void app_main(void) {
     gpio_reset_pin(PIN_RIGHT_IN1);
     gpio_reset_pin(PIN_RIGHT_IN2);
     gpio_reset_pin(PIN_CANNON_LED);
-    gpio_reset_pin(PIN_HEADLIGHT);
+    gpio_reset_pin(PIN_MG_LED);
     gpio_reset_pin(PIN_TURRET_SERVO);
 
     gpio_set_direction(PIN_LEFT_IN1, GPIO_MODE_OUTPUT);
@@ -547,7 +538,7 @@ void app_main(void) {
     gpio_set_direction(PIN_RIGHT_IN1, GPIO_MODE_OUTPUT);
     gpio_set_direction(PIN_RIGHT_IN2, GPIO_MODE_OUTPUT);
     gpio_set_direction(PIN_CANNON_LED, GPIO_MODE_OUTPUT);
-    gpio_set_direction(PIN_HEADLIGHT, GPIO_MODE_OUTPUT);
+    gpio_set_direction(PIN_MG_LED, GPIO_MODE_OUTPUT);
     gpio_set_direction(PIN_TURRET_SERVO, GPIO_MODE_OUTPUT);
 
     gpio_set_level(PIN_LEFT_IN1, 0);
@@ -555,7 +546,7 @@ void app_main(void) {
     gpio_set_level(PIN_RIGHT_IN1, 0);
     gpio_set_level(PIN_RIGHT_IN2, 0);
     gpio_set_level(PIN_CANNON_LED, 0);
-    gpio_set_level(PIN_HEADLIGHT, 0);
+    gpio_set_level(PIN_MG_LED, 0);
 
     // LEDC 초기화
     init_ledc();
