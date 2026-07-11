@@ -37,6 +37,27 @@ Arduino/PlatformIO 프로젝트 **M3Stuart_ESP32C3** 를 ESP-IDF v5.5.2 로 포�
 
 > GPIO20/21은 ESP32-C3 기본 UART0 콘솔용입니다. DFPlayer RX는 **GPIO9**를 사용합니다.
 
+### PCB
+
+회로 개략도는 `pcb/` 에 있습니다.
+
+| 파일 | 설명 |
+|------|------|
+| `pcb/Schematic_M3-Stuart_2026-07-11.png` | M3 Stuart 스케매틱 |
+
+### 3D 출력 (`3dp/`)
+
+기구부 STEP 모델입니다. 슬라이서에서 열어 STL 등으로 변환해 출력하면 됩니다.
+
+| 파일 | 설명 |
+|------|------|
+| `Idler.step` | 아이들러 |
+| `Motor Guide 2mm.step` | 모터 가이드 2mm |
+| `Motor Guide 3mm D.step` | 모터 가이드 3mm |
+| `PCB 3.2.step` | PCB 브라켓 |
+| `Sproket Guide.step` | 스프로킷 가이드 |
+| `Turret.step` | 터렛 |
+
 ### DFPlayer 트랙 (SD 카드)
 
 | 파일 | 용도 |
