@@ -619,14 +619,14 @@ static void control_task(void* arg) {
     while (1) {
         bool cur_connected = gamepad_is_connected();
 
-        // 연결 직후: 터렛 서보 연결 + 입력 유예 + 효과음
+        // 연결 직후: 터렛 서보 연결·중앙 + 입력 유예 + 효과음
         if (gamepad_read_new_connection()) {
             int64_t now = now_ms();
             g_input_ignore_until_ms = now + GAMEPAD_CONNECT_GRACE_MS;
             g_turret_last_step_ms = now; // 유예 직후 즉시 1° 스텝 방지
             g_turret_last_input_ms = now;
             set_track_targets(0, 0);
-            turret_attach(); // 패드 연결 전에는 서보 미연결
+            set_turret_angle(90); // 패드 연결 시 서보 attach + 중앙
 
             dfplayer_stop();
             vTaskDelay(pdMS_TO_TICKS(100));
