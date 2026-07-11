@@ -76,14 +76,22 @@ static const char* TAG = "RC_TANK";
 #define RECOIL_DELAY_MS         350   // LED·효과음 후 반동 시작 지연 (ms)
 #define RECOIL_BACK_DURATION    40    // 포 발사 시 후진 시간 (ms)
 #define RECOIL_SETTLE_DURATION  40    // 후진 후 정지 안정화 (ms)
-// 스틱 전진 = axis_y 음수 → 후진 반동은 양수 속도
-#define RECOIL_BACK_SPEED       400
 
 // ============================================================================
-// 모터 설정
+// 모터 설정 (panzer4: 램프 가속/감속)
 // ============================================================================
-#define MOTOR_MIN_THRESHOLD 80
+// 기동 최소 속도 (0~512). 너무 낮으면 고주파 윙 소리만 나고 바퀴가 안 돔.
+// duty ≈ START * 255 / 512 → 400 ≈ 78%
+#define MOTOR_START_SPEED   400
 #define MOTOR_MAX_SPEED     512
+#define LEDC_MOTOR_DUTY_MAX 255   // 8-bit LEDC
+// 내부 속도 = 실제 속도 * TRACK_SPEED_SCALE (10ms마다 step)
+// 기동(START)→max 약 1초, max→정지 약 0.4초
+#define TRACK_SPEED_SCALE   10
+#define TRACK_ACCEL_STEP    12    // 10ms당 가속 (×10 스케일)
+#define TRACK_DECEL_STEP    100   // 10ms당 감속 (×10 스케일)
+// 스틱 전진 = axis_y 음수 → 후진 반동은 양수 최대 속도
+#define RECOIL_BACK_SPEED   MOTOR_MAX_SPEED
 
 // ============================================================================
 // 외부 함수 선언 (my_platform.c)
@@ -103,6 +111,12 @@ static nvs_handle_t g_nvs_handle;
 // DFPlayer
 static int g_current_volume = 20;
 static int g_temp_volume = 20;
+
+// 트랙 모터 (목표 속도 vs 램프 현재 속도)
+static int g_target_left_speed = 0;
+static int g_target_right_speed = 0;
+static int g_current_left_x10 = 0;
+static int g_current_right_x10 = 0;
 
 // 터렛 서보
 static int g_turret_angle = 90;
@@ -222,29 +236,121 @@ static void init_ledc(void) {
 }
 
 // ============================================================================
-// 모터 제어
+// 모터 제어 (panzer4식 가속/감속 램프)
 // ============================================================================
-static void set_motor_speed(ledc_channel_t ch_in1, ledc_channel_t ch_in2, int speed) {
-    if (abs(speed) < MOTOR_MIN_THRESHOLD) {
-        speed = 0;
-    }
-
-    if (speed > 0) {
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, ch_in1, MOTOR_MAX_SPEED);
+static void apply_motor_pwm(ledc_channel_t ch_in1, ledc_channel_t ch_in2, int speed) {
+    int abs_sp = abs(speed);
+    if (abs_sp == 0) {
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, ch_in1, 0);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, ch_in1);
         ledc_set_duty(LEDC_LOW_SPEED_MODE, ch_in2, 0);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, ch_in2);
-    } else if (speed < 0) {
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, ch_in1, 0);
+        return;
+    }
+
+    if (abs_sp > MOTOR_MAX_SPEED) abs_sp = MOTOR_MAX_SPEED;
+    // 저속 구간은 기동 토크 확보 (윙 소리만 나는 구간 회피)
+    if (abs_sp < MOTOR_START_SPEED) abs_sp = MOTOR_START_SPEED;
+
+    uint32_t duty = (uint32_t)abs_sp * LEDC_MOTOR_DUTY_MAX / MOTOR_MAX_SPEED;
+    if (duty > LEDC_MOTOR_DUTY_MAX) duty = LEDC_MOTOR_DUTY_MAX;
+
+    if (speed > 0) {
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, ch_in1, duty);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, ch_in1);
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, ch_in2, MOTOR_MAX_SPEED);
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, ch_in2, 0);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, ch_in2);
     } else {
         ledc_set_duty(LEDC_LOW_SPEED_MODE, ch_in1, 0);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, ch_in1);
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, ch_in2, 0);
+        ledc_set_duty(LEDC_LOW_SPEED_MODE, ch_in2, duty);
         ledc_update_duty(LEDC_LOW_SPEED_MODE, ch_in2);
     }
+}
+
+// panzer4: 0 기동 시 START 점프, 가속/감속 step, 정지 시 START 이하 → 0
+static void update_track_speed_x10(int* current_x10, int target) {
+    int cur = *current_x10;
+    int target_x10 = target * TRACK_SPEED_SCALE;
+    int min_x10 = MOTOR_START_SPEED * TRACK_SPEED_SCALE;
+
+    if (cur == target_x10) {
+        return;
+    }
+
+    if (cur == 0 && target_x10 != 0) {
+        int sign = (target_x10 > 0) ? 1 : -1;
+        int start = sign * min_x10;
+        int target_abs = (target_x10 > 0) ? target_x10 : -target_x10;
+        if (target_abs <= min_x10) {
+            *current_x10 = target_x10;
+            return;
+        }
+        cur = start;
+        *current_x10 = cur;
+    }
+
+    int diff = target_x10 - cur;
+    bool is_decelerating = false;
+    if (cur > 0) {
+        if (target_x10 < cur) is_decelerating = true;
+    } else if (cur < 0) {
+        if (target_x10 > cur) is_decelerating = true;
+    }
+
+    int step = is_decelerating ? TRACK_DECEL_STEP : TRACK_ACCEL_STEP;
+    if (diff > 0) {
+        *current_x10 = (diff > step) ? (cur + step) : target_x10;
+    } else {
+        *current_x10 = (-diff > step) ? (cur - step) : target_x10;
+    }
+
+    if (target_x10 == 0) {
+        int cur_abs = (*current_x10 > 0) ? *current_x10 : -*current_x10;
+        if (cur_abs < min_x10) {
+            *current_x10 = 0;
+        }
+    }
+}
+
+// 스틱 값 → 목표 속도. 0이 아니면 최소 MOTOR_START_SPEED 보장.
+static int clamp_track_target(int v) {
+    if (v > MOTOR_MAX_SPEED) v = MOTOR_MAX_SPEED;
+    if (v < -MOTOR_MAX_SPEED) v = -MOTOR_MAX_SPEED;
+    if (v != 0 && abs(v) < MOTOR_START_SPEED) {
+        v = (v > 0) ? MOTOR_START_SPEED : -MOTOR_START_SPEED;
+    }
+    return v;
+}
+
+static void set_track_targets(int left, int right) {
+    g_target_left_speed = clamp_track_target(left);
+    g_target_right_speed = clamp_track_target(right);
+}
+
+// 리코일·비상 정지 등 램프 우회
+static void set_track_immediate(int left, int right) {
+    if (left > MOTOR_MAX_SPEED) left = MOTOR_MAX_SPEED;
+    if (left < -MOTOR_MAX_SPEED) left = -MOTOR_MAX_SPEED;
+    if (right > MOTOR_MAX_SPEED) right = MOTOR_MAX_SPEED;
+    if (right < -MOTOR_MAX_SPEED) right = -MOTOR_MAX_SPEED;
+    g_target_left_speed = left;
+    g_target_right_speed = right;
+    g_current_left_x10 = left * TRACK_SPEED_SCALE;
+    g_current_right_x10 = right * TRACK_SPEED_SCALE;
+    apply_motor_pwm(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, left);
+    apply_motor_pwm(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, right);
+}
+
+static void process_motor_ramp(void) {
+    if (g_recoil_active) return;
+
+    update_track_speed_x10(&g_current_left_x10, g_target_left_speed);
+    update_track_speed_x10(&g_current_right_x10, g_target_right_speed);
+    apply_motor_pwm(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2,
+                    g_current_left_x10 / TRACK_SPEED_SCALE);
+    apply_motor_pwm(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2,
+                    g_current_right_x10 / TRACK_SPEED_SCALE);
 }
 
 // ============================================================================
@@ -314,17 +420,9 @@ static void process_gamepad(int32_t axis_y, int32_t axis_ry,
     int left_y = (abs(axis_y) < 50) ? 0 : (int)axis_y;
     int right_y = (abs(axis_ry) < 50) ? 0 : (int)axis_ry;
 
-    int left_speed = left_y;
-    int right_speed = right_y;
-    if (left_speed > MOTOR_MAX_SPEED) left_speed = MOTOR_MAX_SPEED;
-    if (left_speed < -MOTOR_MAX_SPEED) left_speed = -MOTOR_MAX_SPEED;
-    if (right_speed > MOTOR_MAX_SPEED) right_speed = MOTOR_MAX_SPEED;
-    if (right_speed < -MOTOR_MAX_SPEED) right_speed = -MOTOR_MAX_SPEED;
-
-    // 모터 제어 (리코일 중에는 무시)
+    // 목표 속도만 설정 — 실제 PWM은 process_motor_ramp()가 가속/감속
     if (!g_recoil_active) {
-        set_motor_speed(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, left_speed);
-        set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, right_speed);
+        set_track_targets(left_y, right_y);
     }
 
     // D-PAD 좌우: 터렛 회전 (입력 시 재연결, TURRET_STEP_INTERVAL_MS마다 1°)
@@ -462,8 +560,7 @@ static void process_recoil(void) {
         g_recoil_pending = false;
         g_recoil_active = true;
         g_recoil_start_time = now;
-        set_motor_speed(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, RECOIL_BACK_SPEED);
-        set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, RECOIL_BACK_SPEED);
+        set_track_immediate(RECOIL_BACK_SPEED, RECOIL_BACK_SPEED);
         return;
     }
 
@@ -471,13 +568,11 @@ static void process_recoil(void) {
     int64_t elapsed = now - g_recoil_start_time;
 
     if (elapsed < RECOIL_BACK_DURATION) {
-        set_motor_speed(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, RECOIL_BACK_SPEED);
-        set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, RECOIL_BACK_SPEED);
+        set_track_immediate(RECOIL_BACK_SPEED, RECOIL_BACK_SPEED);
         return;
     }
     if (elapsed < RECOIL_BACK_DURATION + RECOIL_SETTLE_DURATION) {
-        set_motor_speed(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, 0);
-        set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, 0);
+        set_track_immediate(0, 0);
         return;
     }
     g_recoil_active = false;
@@ -522,8 +617,7 @@ static void control_task(void* arg) {
             dfplayer_set_volume(15); // initialVolume
             dfplayer_play_loop(DFPLAYER_TRACK_IDLE);
             g_last_idle_sound_time = now_ms();
-            set_motor_speed(LEDC_CH_LEFT_IN1, LEDC_CH_LEFT_IN2, 0);
-            set_motor_speed(LEDC_CH_RIGHT_IN1, LEDC_CH_RIGHT_IN2, 0);
+            set_track_immediate(0, 0);
             g_machinegun_firing = false;
             g_mg_led_on = false;
             gpio_set_level(PIN_MG_LED, 0);
@@ -542,6 +636,7 @@ static void control_task(void* arg) {
         process_cannon_firing();
         process_machinegun_firing();
         process_recoil();
+        process_motor_ramp();
         process_turret_idle();
         process_idle_sound();
 
